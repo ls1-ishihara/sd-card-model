@@ -26,6 +26,13 @@ module tb_sd_card_model;
 
     always #5 sd_clk = ~sd_clk;
 
+`ifdef SD_CARD_MODEL_DUMP_WAVEFORM
+    initial begin
+        $dumpfile("sd_card_model.vcd");
+        $dumpvars(0, tb_sd_card_model);
+    end
+`endif
+
     task automatic fail(input string message);
         begin
             $display("[FAIL] %s", message);

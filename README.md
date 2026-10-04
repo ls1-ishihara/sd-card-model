@@ -19,6 +19,15 @@ vvp tb_sd_card_model.vvp
 
 The testbench prints a PASS line for each test group and exits with a nonzero status on the first failure. The generated `.vvp` file can be deleted after the run.
 
+To generate a VCD waveform, define `SD_CARD_MODEL_DUMP_WAVEFORM` when compiling:
+
+```powershell
+iverilog -g2012 -D SD_CARD_MODEL_DUMP_WAVEFORM -s tb_sd_card_model -o tb_sd_card_model.vvp rtl/*.sv tb/tb_sd_card_model.sv
+vvp tb_sd_card_model.vvp
+```
+
+This writes `sd_card_model.vcd` in the current directory. Without the define, no VCD is produced. Open the VCD with `waveform_viewer` or another VCD viewer.
+
 ## Integration
 
 Instantiate `sd_card_model` and connect `sd_reset_n`, `sd_clk`, `sd_cmd`, and `sd_dat0` to the host's SD Native interface. Set `IMAGE_FILE` to a `$readmemh` file containing one hexadecimal byte per line. The default block size is 512 bytes and the default image capacity is 32 MiB.
