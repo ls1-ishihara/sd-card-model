@@ -1,7 +1,19 @@
 # SDカードモデル波形確認メモ
 
 対象: テストベンチ `tb_sd_card_model` が生成した `sd_card_model.vcd`。
-[全体波形の画像](sdcardmodel_vcd_1.png)と、CMD17の開始・末尾を拡大して確認した結果をまとめる。拡大画像はチャットへの添付であり、このディレクトリには保存していない。
+[全体波形の画像](sdcardmodel_vcd_1.png)と、CMD17の開始・末尾を拡大して確認した結果をまとめる。
+
+## 波形ダンプの再現手順
+
+ワークスペース直下のPowerShellからプロジェクトディレクトリへ移動し、波形ダンプ用defineを付けてコンパイル・実行する。`tb/boot.mem`を相対パスで読み込むため、プロジェクトディレクトリから実行すること。
+
+```powershell
+Set-Location .\generate_rtl\sd-card-model
+& 'C:\iverilog\bin\iverilog.exe' -g2012 -D SD_CARD_MODEL_DUMP_WAVEFORM -s tb_sd_card_model -o tb_sd_card_model.vvp rtl\*.sv tb\tb_sd_card_model.sv
+& 'C:\iverilog\bin\vvp.exe' tb_sd_card_model.vvp
+```
+
+実行ディレクトリに`sd_card_model.vcd`が生成される。defineを外してコンパイルするとVCDは出力されない。
 
 ## 波形を読むときの前提
 
