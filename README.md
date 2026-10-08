@@ -7,6 +7,8 @@ SystemVerilog functional model for an SD Native 1-bit host. The model supports t
 - `rtl/`: command receiver/decoder, state manager, response generator, memory reader, data sender, and top-level model.
 - `tb/tb_sd_card_model.sv`: self-checking initialization and data-transfer tests.
 - `tb/boot.mem`: sample image. Uninitialized image locations and out-of-range blocks read as zero.
+- [Waveform walkthrough](verif/waveform_walkthrough.md): waveform dump commands and a concise behavior summary.
+- [Waveform walkthrough2](verif/waveform_walkthrough2.md): viewer screenshots, measured timing, and an RTL signal-tracing guide (Japanese).
 
 ## Run tests
 
