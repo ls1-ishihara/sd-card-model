@@ -1,4 +1,6 @@
-module sd_state_manager (
+module sd_state_manager #(
+    parameter bit ALLOW_4BIT = 1'b0
+) (
     input  logic       sd_clk,
     input  logic       sd_reset_n,
     input  logic       command_valid,
@@ -8,6 +10,7 @@ module sd_state_manager (
     output logic [2:0] card_state,
     output logic       app_cmd_pending,
     output logic [7:0] acmd41_count,
+    output logic       bus_width_4bit,
     output logic       command_illegal,
     output logic       acmd41_ready
 );
@@ -26,14 +29,18 @@ module sd_state_manager (
     localparam logic [3:0] CMD_RELATIVE_ADDR = 4'd6;
     localparam logic [3:0] CMD_SELECT = 4'd7;
     localparam logic [3:0] CMD_READ_SINGLE = 4'd8;
+    localparam logic [3:0] CMD_SET_BUS_WIDTH = 4'd9;
 
     always_comb begin
         command_illegal = 1'b0;
         if (command_valid && command_kind != CMD_GO_IDLE) begin
             case (command_kind)
                 CMD_SEND_IF_COND: command_illegal = card_state != CARD_IDLE;
-                CMD_APP: command_illegal = card_state != CARD_IDLE;
+                CMD_APP: command_illegal = card_state != CARD_IDLE && card_state != CARD_TRANSFER;
                 CMD_OP_COND: command_illegal = card_state != CARD_IDLE;
+                CMD_SET_BUS_WIDTH: command_illegal = card_state != CARD_TRANSFER
+                    || (command_argument[1:0] != 2'b00 && command_argument[1:0] != 2'b10)
+                    || (command_argument[1:0] == 2'b10 && !ALLOW_4BIT);
                 CMD_ALL_CID: command_illegal = card_state != CARD_READY;
                 CMD_RELATIVE_ADDR: command_illegal = card_state != CARD_IDENT;
                 CMD_SELECT: command_illegal = card_state != CARD_STANDBY && card_state != CARD_TRANSFER;
@@ -52,16 +59,19 @@ module sd_state_manager (
             card_state <= CARD_IDLE;
             app_cmd_pending <= 1'b0;
             acmd41_count <= '0;
+            bus_width_4bit <= 1'b0;
         end else if (command_valid) begin
             if (command_kind == CMD_GO_IDLE) begin
                 card_state <= CARD_IDLE;
                 app_cmd_pending <= 1'b0;
                 acmd41_count <= '0;
+                bus_width_4bit <= 1'b0;
             end else begin
                 app_cmd_pending <= 1'b0;
                 if (!command_illegal) begin
                     case (command_kind)
                         CMD_APP: app_cmd_pending <= 1'b1;
+                        CMD_SET_BUS_WIDTH: bus_width_4bit <= command_argument[1:0] == 2'b10;
                         CMD_OP_COND: begin
                             if (acmd41_count != 8'hff)
                                 acmd41_count <= acmd41_count + 1'b1;
@@ -106,6 +116,7 @@ module sd_state_manager (
                         if (card_state == CARD_STANDBY) $display("[SD] State STANDBY -> TRANSFER");
                     end
                     CMD_READ_SINGLE: $display("[SD] CMD17 block=%0d", command_argument);
+                    CMD_SET_BUS_WIDTH: $display("[SD] ACMD6 bus width=%0d", command_argument[1:0] == 2'b10 ? 4 : 1);
                     default: $display("[SD][ERROR] Unsupported command CMD%0d", command_index);
                 endcase
             end

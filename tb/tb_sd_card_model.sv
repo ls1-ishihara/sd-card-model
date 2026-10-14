@@ -6,7 +6,13 @@ module tb_sd_card_model;
     logic host_cmd_oe = 1'b0;
     logic host_cmd_out = 1'b1;
     tri1 sd_cmd;
+`ifdef SD_CARD_MODEL_4BIT
+    tri1 [3:0] sd_dat;
+    wire sd_dat0;
+    assign sd_dat0 = sd_dat[0];
+`else
     tri1 sd_dat0;
+`endif
     logic [47:0] command_frame;
     logic [135:0] response_frame;
     logic [7:0] received_byte;
@@ -21,14 +27,23 @@ module tb_sd_card_model;
         .RESPONSE_DELAY(8)
     ) dut (
         .sd_reset_n(sd_reset_n), .sd_clk(sd_clk),
-        .sd_cmd(sd_cmd), .sd_dat0(sd_dat0)
+        .sd_cmd(sd_cmd),
+    `ifdef SD_CARD_MODEL_4BIT
+        .sd_dat(sd_dat)
+    `else
+        .sd_dat0(sd_dat0)
+    `endif
     );
 
     always #5 sd_clk = ~sd_clk;
 
 `ifdef SD_CARD_MODEL_DUMP_WAVEFORM
     initial begin
-        $dumpfile("sd_card_model.vcd");
+`ifdef SD_CARD_MODEL_4BIT
+    $dumpfile("sd_card_model_4bit.vcd");
+`else
+    $dumpfile("sd_card_model_1bit.vcd");
+`endif
         $dumpvars(0, tb_sd_card_model);
     end
 `endif
@@ -91,10 +106,38 @@ module tb_sd_card_model;
         end
     endtask
 
-    task automatic read_and_check_block(input logic [31:0] block_number, input logic expect_pattern);
-        logic [7:0] expected_byte;
-        integer cycles;
+    task automatic issue_acmd6(input logic [1:0] width_arg, input logic expected_illegal);
+        logic old_width;
         begin
+            old_width = dut.bus_width_4bit;
+            send_command(6'd55, 32'h00000000);
+            check_r1(1'b0, "CMD55 before ACMD6");
+            send_command(6'd6, {30'b0, width_arg});
+            check_r1(expected_illegal, "ACMD6");
+            if (expected_illegal) begin
+                if (dut.bus_width_4bit !== old_width) fail("Rejected ACMD6 changed bus width");
+            end else if (dut.bus_width_4bit !== (width_arg == 2'b10)) begin
+                fail("ACMD6 bus width did not update");
+            end
+        end
+    endtask
+
+    task automatic read_and_check_block(
+        input logic [31:0] block_number,
+        input logic expect_pattern,
+        input logic use_4bit
+    );
+        logic [7:0] expected_byte;
+        logic [3:0] upper_nibble;
+        logic [3:0] lower_nibble;
+        integer cycles;
+        integer expected_transfer_clocks;
+        time data_start_time;
+        time data_end_time;
+        begin
+`ifndef SD_CARD_MODEL_4BIT
+            if (use_4bit) fail("4-bit transfer requested without SD_CARD_MODEL_4BIT");
+`endif
             send_command(6'd17, block_number);
             check_r1(1'b0, "CMD17 R1");
             cycles = 0;
@@ -105,12 +148,28 @@ module tb_sd_card_model;
             end
             if (cycles == 64) fail("Timed out waiting for DAT0 start bit");
             if (($time - response_end_time) / 10 != 8) fail("CMD17 DAT0 response delay was not 8 clocks");
+            data_start_time = $time;
+`ifdef SD_CARD_MODEL_4BIT
+            if (use_4bit && sd_dat !== 4'b0000) fail("4-bit DAT start bits were not all zero");
+`endif
             for (integer byte_index = 0; byte_index < 512; byte_index = byte_index + 1) begin
-                received_byte = '0;
-                for (integer bit_index = 7; bit_index >= 0; bit_index = bit_index - 1) begin
+                if (use_4bit) begin
+`ifdef SD_CARD_MODEL_4BIT
                     @(posedge sd_clk);
                     #1;
-                    received_byte[bit_index] = sd_dat0;
+                    upper_nibble = sd_dat;
+                    @(posedge sd_clk);
+                    #1;
+                    lower_nibble = sd_dat;
+                    received_byte = {upper_nibble, lower_nibble};
+`endif
+                end else begin
+                    received_byte = '0;
+                    for (integer bit_index = 7; bit_index >= 0; bit_index = bit_index - 1) begin
+                        @(posedge sd_clk);
+                        #1;
+                        received_byte[bit_index] = sd_dat0;
+                    end
                 end
                 expected_byte = 8'h00;
                 if (expect_pattern && byte_index == 0) expected_byte = 8'hA5;
@@ -125,13 +184,26 @@ module tb_sd_card_model;
                 @(posedge sd_clk);
                 #1;
                 if (sd_dat0 !== 1'b0) fail("Dummy CRC16 was not zero");
+`ifdef SD_CARD_MODEL_4BIT
+                if (use_4bit && sd_dat !== 4'b0000) fail("4-bit Dummy CRC16 was not zero on every lane");
+`endif
             end
             @(posedge sd_clk);
             #1;
             if (sd_dat0 !== 1'b1) fail("DAT0 end bit was not one");
+            data_end_time = $time;
+`ifdef SD_CARD_MODEL_4BIT
+            if (use_4bit && sd_dat !== 4'b1111) fail("4-bit end bits were not all one");
+`endif
+            expected_transfer_clocks = use_4bit ? 1042 : 4114;
+            if ((data_end_time - data_start_time) / 10 + 1 != expected_transfer_clocks)
+                fail("CMD17 data transfer clock count mismatch");
             @(posedge sd_clk);
             #1;
             if (sd_dat0 !== 1'b1) fail("DAT0 was not released to High-Z");
+`ifdef SD_CARD_MODEL_4BIT
+            if (use_4bit && sd_dat !== 4'b1111) fail("4-bit DAT lines were not released");
+`endif
         end
     endtask
 
@@ -177,17 +249,52 @@ module tb_sd_card_model;
         check_r1(1'b0, "CMD7 select");
         pass("TC002 initialization and card selection");
 
-        read_and_check_block(32'd0, 1'b1);
+        send_command(6'd6, 32'h00000002);
+        check_r1(1'b1, "CMD6 without CMD55");
+        if (dut.bus_width_4bit !== 1'b0) fail("CMD6 without CMD55 changed bus width");
+        pass("CMD6 requires CMD55");
+
+    `ifdef SD_CARD_MODEL_4BIT
+        issue_acmd6(2'b10, 1'b0);
+        pass("ACMD6 switches to 4-bit mode");
+        issue_acmd6(2'b01, 1'b1);
+        pass("Invalid ACMD6 preserves 4-bit mode");
+        read_and_check_block(32'd0, 1'b1, 1'b1);
+    `else
+        issue_acmd6(2'b00, 1'b0);
+        pass("ACMD6 selects 1-bit mode");
+        issue_acmd6(2'b10, 1'b1);
+        pass("Unavailable 4-bit mode is rejected");
+        read_and_check_block(32'd0, 1'b1, 1'b0);
+    `endif
         pass("TC003 block zero data");
         pass("TC005 MSB-first byte order");
-        read_and_check_block(32'd1, 1'b0);
+    `ifdef SD_CARD_MODEL_4BIT
+        issue_acmd6(2'b00, 1'b0);
+        pass("ACMD6 switches back to 1-bit mode");
+        read_and_check_block(32'd1, 1'b0, 1'b0);
+    `else
+        read_and_check_block(32'd1, 1'b0, 1'b0);
+    `endif
         pass("TC004 arbitrary block address");
-        read_and_check_block(32'd0, 1'b1);
+    `ifdef SD_CARD_MODEL_4BIT
+        issue_acmd6(2'b10, 1'b0);
+        read_and_check_block(32'd0, 1'b1, 1'b1);
+    `else
+        read_and_check_block(32'd0, 1'b1, 1'b0);
+    `endif
         pass("TC010 consecutive CMD17 reads");
-        read_and_check_block(32'd2, 1'b0);
+    `ifdef SD_CARD_MODEL_4BIT
+        read_and_check_block(32'd2, 1'b0, 1'b1);
+    `else
+        read_and_check_block(32'd2, 1'b0, 1'b0);
+    `endif
         pass("TC006 out-of-range zero fill");
 
         send_command(6'd0, 32'h00000000);
+        @(posedge sd_clk);
+        #1;
+        if (dut.bus_width_4bit !== 1'b0) fail("CMD0 did not reset bus width to 1-bit");
         send_command(6'd17, 32'h00000000);
         check_r1(1'b1, "CMD17 in IDLE");
         if (sd_dat0 !== 1'b1) fail("Invalid CMD17 started a data transfer");

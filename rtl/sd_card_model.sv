@@ -7,7 +7,11 @@ module sd_card_model #(
     input  logic sd_reset_n,
     input  logic sd_clk,
     inout  wire  sd_cmd,
+`ifdef SD_CARD_MODEL_4BIT
+    inout  wire [3:0] sd_dat
+`else
     inout  wire  sd_dat0
+`endif
 );
     localparam logic [2:0] CARD_IDLE = 3'd0;
     localparam logic [2:0] CARD_READY = 3'd1;
@@ -24,11 +28,18 @@ module sd_card_model #(
     localparam logic [3:0] CMD_RELATIVE_ADDR = 4'd6;
     localparam logic [3:0] CMD_SELECT = 4'd7;
     localparam logic [3:0] CMD_READ_SINGLE = 4'd8;
+    localparam logic [3:0] CMD_SET_BUS_WIDTH = 4'd9;
+
+`ifdef SD_CARD_MODEL_4BIT
+    localparam bit ALLOW_4BIT = 1'b1;
+`else
+    localparam bit ALLOW_4BIT = 1'b0;
+`endif
 
     logic sd_cmd_out;
     logic sd_cmd_oe;
-    logic sd_dat0_out;
-    logic sd_dat0_oe;
+    logic [3:0] sd_dat_out;
+    logic [3:0] sd_dat_oe;
     logic command_valid;
     logic [5:0] command_index;
     logic [31:0] command_argument;
@@ -36,6 +47,7 @@ module sd_card_model #(
     logic [2:0] card_state;
     logic app_cmd_pending;
     logic [7:0] acmd41_count;
+    logic bus_width_4bit;
     logic command_illegal;
     logic acmd41_ready;
     logic response_start;
@@ -55,7 +67,11 @@ module sd_card_model #(
     logic selected_response_illegal;
 
     assign sd_cmd = sd_cmd_oe ? sd_cmd_out : 1'bz;
-    assign sd_dat0 = sd_dat0_oe ? sd_dat0_out : 1'bz;
+`ifdef SD_CARD_MODEL_4BIT
+    assign sd_dat = sd_dat_oe ? sd_dat_out : 4'bzzzz;
+`else
+    assign sd_dat0 = sd_dat_oe[0] ? sd_dat_out[0] : 1'bz;
+`endif
 
     sd_command_receiver command_receiver (
         .sd_clk(sd_clk), .sd_reset_n(sd_reset_n), .card_cmd_oe(sd_cmd_oe), .sd_cmd_in(sd_cmd),
@@ -68,11 +84,12 @@ module sd_card_model #(
         .command_kind(command_kind)
     );
 
-    sd_state_manager state_manager (
+    sd_state_manager #(.ALLOW_4BIT(ALLOW_4BIT)) state_manager (
         .sd_clk(sd_clk), .sd_reset_n(sd_reset_n), .command_valid(command_valid),
         .command_index(command_index), .command_kind(command_kind), .command_argument(command_argument),
         .card_state(card_state), .app_cmd_pending(app_cmd_pending),
-        .acmd41_count(acmd41_count), .command_illegal(command_illegal),
+        .acmd41_count(acmd41_count), .bus_width_4bit(bus_width_4bit),
+        .command_illegal(command_illegal),
         .acmd41_ready(acmd41_ready)
     );
 
@@ -96,8 +113,9 @@ module sd_card_model #(
     ) data_sender (
         .sd_clk(sd_clk), .sd_reset_n(sd_reset_n), .start(data_start),
         .block_address(read_block_address), .memory_data(memory_data),
-        .memory_offset(memory_offset), .sd_dat0_out(sd_dat0_out),
-        .sd_dat0_oe(sd_dat0_oe), .busy(data_busy), .done(data_done)
+        .memory_offset(memory_offset), .bus_width_4bit(bus_width_4bit),
+        .sd_dat_out(sd_dat_out), .sd_dat_oe(sd_dat_oe),
+        .busy(data_busy), .done(data_done)
     );
 
     always_comb begin
@@ -144,7 +162,7 @@ module sd_card_model #(
                                 response_start <= 1'b1;
                             end
                             CMD_APP, CMD_OP_COND, CMD_SELECT, CMD_READ_SINGLE,
-                            CMD_RELATIVE_ADDR, CMD_ALL_CID, CMD_UNKNOWN: begin
+                            CMD_RELATIVE_ADDR, CMD_ALL_CID, CMD_SET_BUS_WIDTH, CMD_UNKNOWN: begin
                                 if (command_kind == CMD_RELATIVE_ADDR && !command_illegal) begin
                                     response_frame <= {{2'b00, 6'd3, 16'h1234, 16'h0000, 7'b0, 1'b1}, 88'b0};
                                 end else if (command_kind == CMD_OP_COND) begin

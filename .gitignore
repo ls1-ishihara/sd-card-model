@@ -1,2 +1,4 @@
 *.vvp
 sd_card_model.vcd
+sd_card_model_1bit.vcd
+sd_card_model_4bit.vcd

@@ -12,12 +12,14 @@ module sd_command_decoder (
     localparam logic [3:0] CMD_RELATIVE_ADDR = 4'd6;
     localparam logic [3:0] CMD_SELECT = 4'd7;
     localparam logic [3:0] CMD_READ_SINGLE = 4'd8;
+    localparam logic [3:0] CMD_SET_BUS_WIDTH = 4'd9;
 
     always_comb begin
         command_kind = CMD_UNKNOWN;
         case (command_index)
             6'd0: command_kind = CMD_GO_IDLE;
             6'd8: command_kind = CMD_SEND_IF_COND;
+            6'd6: if (app_cmd_pending) command_kind = CMD_SET_BUS_WIDTH;
             6'd55: command_kind = CMD_APP;
             6'd41: if (app_cmd_pending) command_kind = CMD_OP_COND;
             6'd2: command_kind = CMD_ALL_CID;

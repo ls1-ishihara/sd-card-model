@@ -26,7 +26,8 @@
 
 本モデルは以下の方針で設計する。
 
-- SD Native Modeの1-bitデータバスを対象とする
+- SD Native Modeの1-bitデータバスを既定とし、`SD_CARD_MODEL_4BIT` defineで4-bit I/Fを有効にする
+- 4-bit対応ビルドでは、CARD_TRANSFER状態でCMD55 + ACMD6を受信してデータ幅を切り替える
 - 読み出し専用とする
 - 初期化と単一ブロック読み出しに必要なコマンドのみ実装する
 - 応答レイテンシは固定値とする
@@ -42,6 +43,8 @@
 
 - SD Native Mode
 - 1-bit Data Bus
+- オプションの4-bit Data Bus (`SD_CARD_MODEL_4BIT` define)
+- ACMD6による1-bit/4-bitバス幅切り替え
 - 48-bitコマンド受信
 - SDカード初期化シーケンス
 - 固定CID応答
@@ -55,7 +58,6 @@
 
 ### 2.2 非対応機能
 
-- SD 4-bitモード
 - SPIモード
 - 書き込み
 - マルチブロック読み出し
@@ -70,7 +72,6 @@
 - SDIO I/O機能
 - 実デバイス相当のタイミング検証
 - 電源投入シーケンスの厳密な再現
-- Bus Width切り替え
 - カード容量の自動判定
 - FATファイルシステム解析
 
@@ -96,7 +97,7 @@
          |
          | sd_clk
          | sd_cmd
-         | sd_dat0
+         | sd_dat[3:0] / sd_dat0
          v
 +------------------+
 | SD Card Model    |
@@ -192,7 +193,11 @@ module sd_card_model #(
     input  logic sd_reset_n,
     input  logic sd_clk,
     inout  wire  sd_cmd,
+`ifdef SD_CARD_MODEL_4BIT
+    inout  wire [3:0] sd_dat
+`else
     inout  wire  sd_dat0
+`endif
 );
 ```
 
@@ -205,7 +210,8 @@ module sd_card_model #(
 | `sd_reset_n` | input | 0 | モデルの非同期または同期リセット |
 | `sd_clk` | input | 0 | SD Host Controllerから供給されるクロック |
 | `sd_cmd` | inout | Z | コマンドおよびレスポンスライン |
-| `sd_dat0` | inout | Z | 1-bitデータライン |
+| `sd_dat0` | inout | Z | 1-bitビルドのデータライン |
+| `sd_dat[3:0]` | inout | Z | `SD_CARD_MODEL_4BIT`ビルドの4-bitデータライン |
 
 ---
 
@@ -231,16 +237,20 @@ sd_cmd    = Z
 
 ---
 
-## 4.4 DAT0ライン制御
+## 4.4 DATライン制御
 
 ```systemverilog
-logic sd_dat0_out;
-logic sd_dat0_oe;
+logic [3:0] sd_dat_out;
+logic [3:0] sd_dat_oe;
 
-assign sd_dat0 = sd_dat0_oe ? sd_dat0_out : 1'bz;
+`ifdef SD_CARD_MODEL_4BIT
+assign sd_dat = sd_dat_oe ? sd_dat_out : 4'bzzzz;
+`else
+assign sd_dat0 = sd_dat_oe[0] ? sd_dat_out[0] : 1'bz;
+`endif
 ```
 
-データブロック送信時以外はDAT0を駆動しない。
+4-bitビルドではデータ幅に応じて使用するDAT線を駆動し、送信中以外は全DAT線をHigh-Zへ解放する。defineなしの1-bitビルドでは`sd_dat0`のみを公開する。
 
 ---
 
@@ -433,7 +443,7 @@ CMD17ではカード状態を変更しない。
 | `CARD_READY` | CMD0、CMD2 |
 | `CARD_IDENT` | CMD0、CMD3 |
 | `CARD_STANDBY` | CMD0、CMD7 |
-| `CARD_TRANSFER` | CMD0、CMD7、CMD17 |
+| `CARD_TRANSFER` | CMD0、CMD7、CMD17、CMD55、ACMD6 |
 
 許可されていない状態でコマンドを受信した場合、`ILLEGAL_COMMAND`を含むR1レスポンスを返す。
 
@@ -640,7 +650,28 @@ R1形式。
 
 ---
 
-## 8.8 CMD17: READ_SINGLE_BLOCK
+## 8.8 ACMD6: SET_BUS_WIDTH
+
+### 許可状態
+
+```text
+CARD_TRANSFER
+```
+
+CMD55の次にCMD6を受信した場合にACMD6として扱う。引数`[1:0]`が`00`なら1-bit、`10`なら4-bitを選択する。その他の値、TRANSFER以外の状態、または4-bit未対応ビルドでの4-bit要求には`ILLEGAL_COMMAND`を含むR1を返し、現在の幅を維持する。
+
+リセットおよびCMD0後は常に1-bitである。4-bitビルドのテストベンチは初期化・CMD7選択を1-bitで行い、ACMD6のR1応答後にホスト側を4-bitへ切り替える。
+
+### ビルド条件
+
+```text
+SD_CARD_MODEL_4BIT defineなし : sd_dat0 I/F、1-bitのみ
+SD_CARD_MODEL_4BIT defineあり : sd_dat[3:0] I/F、ACMD6で1-bit/4-bit切り替え可能
+```
+
+---
+
+## 8.9 CMD17: READ_SINGLE_BLOCK
 
 ### 許可状態
 
@@ -677,7 +708,7 @@ CARD_TRANSFER -> CARD_TRANSFER
 1. CMD17を受信する
 2. R1レスポンスを送信する
 3. 固定クロック数待機する
-4. DAT0にStart Bitを送信する
+4. 選択中のDAT線にStart Bitを送信する
 5. 512 byteをMSB firstで送信する
 6. Dummy CRC16を送信する
 7. End Bitを送信する
@@ -1150,9 +1181,11 @@ CMD7で`0x1234`以外のRCAを指定する。
 - CMD2に対して固定CIDを返す
 - CMD3に対して固定RCAを返す
 - CMD7により`CARD_TRANSFER`へ遷移する
+- CMD55後のACMD6で1-bit/4-bit幅を切り替え、CMD0で1-bitへ戻る
 - CMD17に対して512 byteを返す
 - CMD17のデータがboot.memと一致する
 - 各バイトがMSB firstで出力される
+- 4-bit時は上位/下位ニブル順で4線へ出力される
 - Dummy CRC16が16 bit出力される
 - 非対応コマンドに対してエラー応答する
 - 範囲外アクセス時に512 byteのゼロデータを返す
@@ -1188,7 +1221,9 @@ README.md
 - SystemVerilogで記述すること
 - 合成可能性は要求しない
 - DUTとなるSD Host Controllerに接続可能なinoutインターフェースとすること
-- CMDラインとDAT0ラインは出力イネーブルで制御すること
+- CMDラインと使用中のDATラインは出力イネーブルで制御すること
+- `SD_CARD_MODEL_4BIT` defineの有無で1-bit/4-bitの外部DAT I/Fを切り替えること
+- 4-bit対応ビルドではACMD6による幅切り替えを実装すること
 - コマンド受信FSMとデータ送信FSMを分離すること
 - CMD17の512-byteデータ送信をテストベンチで自動比較すること
 - 各テストケースのPASS/FAILを表示すること
@@ -1215,3 +1250,35 @@ README.md
 - 実デバイス固有応答
 
 FPGA実機へ移行する際は、実SDカードの初期化シーケンス、CRC、タイムアウト、カード種別、ブロックアドレス方式を別途確認すること。
+
+---
+
+# 17. SD Native 4-bitモード拡張
+
+## 17.1 ビルドと初期幅
+
+`SD_CARD_MODEL_4BIT`を定義しない場合、トップのDAT I/Fは従来互換の`sd_dat0`で、4-bit要求はエラーとする。defineしたビルドでは`sd_dat[3:0]`を公開し、4-bit転送に対応する。カード幅はどちらのビルドでもリセット/CMD0後に1-bitであり、CARD_TRANSFER状態でCMD55 + ACMD6を受けて切り替える。
+
+ACMD6のArgument[1:0]は`00`で1-bit、`10`で4-bitを指定する。その他の値、許可状態外の要求、4-bit未対応ビルドでの4-bit要求は`ILLEGAL_COMMAND`として拒否し、現行幅を維持する。CMD55はCARD_IDLEおよびCARD_TRANSFER状態で受理する。
+
+## 17.2 データ線の並列転送
+
+4-bit時はDAT[3:0]を同時に使用し、1クロックで4 bitを送る。各バイトは上位ニブルを先に送り、次に下位ニブルを送る。
+
+```text
+先行クロック: DAT[3:0] = byte[7:4]
+次クロック  : DAT[3:0] = byte[3:0]
+```
+
+Start Bitは全使用線で0、End Bitは全使用線で1とする。Dummy CRC16は16クロック、全使用線で0を出力する。1-bit転送はStart/Data/CRC/Endの合計4114クロック、4-bit転送は1042クロックとなる。応答後の固定待ち時間は従来どおり8クロック。
+
+4-bit時の有効データは`sd_dat[3:0]`、1-bit時は`sd_dat0`または4-bit I/FのDAT0を使用する。データ送信終了後は全DAT線をHigh-Zへ解放する。
+
+## 17.3 追加テスト
+
+- defineなしで初期化、ACMD6 1-bit選択、4-bit要求拒否、既存CMD17データ比較を実施する。
+- `SD_CARD_MODEL_4BIT` defineありで、初期化は1-bitで行い、ACMD6による1→4→1→4-bit切替を検証する。
+- CMD55なしのCMD6、および不正なACMD6幅引数はエラー応答し、現在の幅を維持する。
+- 両モードで512バイト全体、バイト順、Start/End、Dummy CRC、DAT解放を比較する。
+- 1-bitは4114クロック、4-bitは1042クロック、応答からデータ開始まで8クロックであることを確認する。
+- CMD0で4-bit幅が1-bitへ戻ることを確認する。
